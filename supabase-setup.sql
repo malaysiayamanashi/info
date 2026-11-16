@@ -54,6 +54,7 @@ create table if not exists public.restaurants (
   image_source_url text check (image_source_url is null or (char_length(image_source_url) <= 1000 and image_source_url ~ '^https?://')),
   listing_type text not null default 'restaurant' check (listing_type in ('restaurant','grocery','konbini')),
   halal_scope text not null default 'selected' check (halal_scope in ('all','selected','unconfirmed')),
+  price_level text check (price_level is null or price_level in ('cheap','moderate','expensive')),
   price_min_yen integer check (price_min_yen is null or price_min_yen >= 0),
   price_max_yen integer check (price_max_yen is null or price_max_yen >= 0),
   latitude numeric(9,6) check (latitude between -90 and 90),
@@ -66,6 +67,7 @@ alter table public.restaurants add column if not exists region_name text not nul
 alter table public.restaurants add column if not exists image_source_url text;
 alter table public.restaurants add column if not exists listing_type text not null default 'restaurant';
 alter table public.restaurants add column if not exists halal_scope text not null default 'selected';
+alter table public.restaurants add column if not exists price_level text;
 alter table public.restaurants add column if not exists price_min_yen integer;
 alter table public.restaurants add column if not exists price_max_yen integer;
 alter table public.restaurants add column if not exists latitude numeric(9,6);
@@ -74,6 +76,8 @@ alter table public.restaurants drop constraint if exists restaurants_listing_typ
 alter table public.restaurants add constraint restaurants_listing_type_check check (listing_type in ('restaurant','grocery','konbini'));
 alter table public.restaurants drop constraint if exists restaurants_halal_scope_check;
 alter table public.restaurants add constraint restaurants_halal_scope_check check (halal_scope in ('all','selected','unconfirmed'));
+alter table public.restaurants drop constraint if exists restaurants_price_level_check;
+alter table public.restaurants add constraint restaurants_price_level_check check (price_level is null or price_level in ('cheap','moderate','expensive'));
 alter table public.restaurants drop constraint if exists restaurants_price_min_yen_check;
 alter table public.restaurants add constraint restaurants_price_min_yen_check check (price_min_yen is null or price_min_yen >= 0);
 alter table public.restaurants drop constraint if exists restaurants_price_max_yen_check;
@@ -239,6 +243,15 @@ values
  ('gusto-kofu-asahi','yamanashi','Yamanashi','kofu','Kofu','Gusto Kofu Asahi','Family restaurant','Selected menu options reported by the community. Confirm ingredients and preparation at the branch.','https://store-info.skylark.co.jp/gusto/map/011185/','restaurant','selected',800,2000,35.673346,138.567953),
  ('new-mahal-kofu','yamanashi','Yamanashi','kofu','Kofu','New Mahal Kofu','Indian restaurant','Entire menu reported halal by the community. Contact the restaurant to confirm current menu and preparation.','https://www.google.com/maps/search/?api=1&query=New+Mahal+1-4-12+Kitaguchi+Kofu+Yamanashi','restaurant','all',850,1500,null,null)
 on conflict (slug) do update set region_slug=excluded.region_slug,region_name=excluded.region_name,area_slug=excluded.area_slug,area_name=excluded.area_name,name=excluded.name,category=excluded.category,description=excluded.description,map_url=excluded.map_url,listing_type=excluded.listing_type,halal_scope=excluded.halal_scope,price_min_yen=excluded.price_min_yen,price_max_yen=excluded.price_max_yen,latitude=coalesce(public.restaurants.latitude,excluded.latitude),longitude=coalesce(public.restaurants.longitude,excluded.longitude);
+
+-- Migrate existing spend ranges to the simple public price-level options.
+update public.restaurants
+set price_level = case
+  when (coalesce(price_min_yen,0) + coalesce(price_max_yen,price_min_yen,0)) / 2 <= 1999 then 'cheap'
+  when (coalesce(price_min_yen,0) + coalesce(price_max_yen,price_min_yen,0)) / 2 <= 3999 then 'moderate'
+  else 'expensive'
+end
+where price_level is null and (price_min_yen is not null or price_max_yen is not null);
 
 -- Preserve menu entries from earlier versions by creating a generic directory record for their keys.
 insert into public.restaurants (slug,area_slug,area_name,name,category,description)
