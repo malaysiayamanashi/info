@@ -52,12 +52,38 @@ create table if not exists public.restaurants (
   map_url text check (map_url is null or (char_length(map_url) <= 500 and map_url ~ '^https?://')),
   image_url text,
   image_source_url text check (image_source_url is null or (char_length(image_source_url) <= 1000 and image_source_url ~ '^https?://')),
+  listing_type text not null default 'restaurant' check (listing_type in ('restaurant','grocery','konbini')),
+  halal_scope text not null default 'selected' check (halal_scope in ('all','selected','unconfirmed')),
+  price_min_yen integer check (price_min_yen is null or price_min_yen >= 0),
+  price_max_yen integer check (price_max_yen is null or price_max_yen >= 0),
+  latitude numeric(9,6) check (latitude between -90 and 90),
+  longitude numeric(9,6) check (longitude between -180 and 180),
   created_at timestamptz not null default now()
 );
 
 alter table public.restaurants add column if not exists region_slug text not null default 'yamanashi';
 alter table public.restaurants add column if not exists region_name text not null default 'Yamanashi';
 alter table public.restaurants add column if not exists image_source_url text;
+alter table public.restaurants add column if not exists listing_type text not null default 'restaurant';
+alter table public.restaurants add column if not exists halal_scope text not null default 'selected';
+alter table public.restaurants add column if not exists price_min_yen integer;
+alter table public.restaurants add column if not exists price_max_yen integer;
+alter table public.restaurants add column if not exists latitude numeric(9,6);
+alter table public.restaurants add column if not exists longitude numeric(9,6);
+alter table public.restaurants drop constraint if exists restaurants_listing_type_check;
+alter table public.restaurants add constraint restaurants_listing_type_check check (listing_type in ('restaurant','grocery','konbini'));
+alter table public.restaurants drop constraint if exists restaurants_halal_scope_check;
+alter table public.restaurants add constraint restaurants_halal_scope_check check (halal_scope in ('all','selected','unconfirmed'));
+alter table public.restaurants drop constraint if exists restaurants_price_min_yen_check;
+alter table public.restaurants add constraint restaurants_price_min_yen_check check (price_min_yen is null or price_min_yen >= 0);
+alter table public.restaurants drop constraint if exists restaurants_price_max_yen_check;
+alter table public.restaurants add constraint restaurants_price_max_yen_check check (price_max_yen is null or price_max_yen >= 0);
+alter table public.restaurants drop constraint if exists restaurants_price_range_check;
+alter table public.restaurants add constraint restaurants_price_range_check check (price_min_yen is null or price_max_yen is null or price_min_yen <= price_max_yen);
+alter table public.restaurants drop constraint if exists restaurants_latitude_check;
+alter table public.restaurants add constraint restaurants_latitude_check check (latitude between -90 and 90);
+alter table public.restaurants drop constraint if exists restaurants_longitude_check;
+alter table public.restaurants add constraint restaurants_longitude_check check (longitude between -180 and 180);
 create table if not exists public.food_areas (
   id uuid primary key default gen_random_uuid(),
   region_slug text not null check (char_length(btrim(region_slug)) between 2 and 60),
@@ -73,15 +99,17 @@ insert into public.food_areas (region_slug,region_name,area_slug,area_name,is_na
   ('tokyo','Tokyo','shinjuku','Shinjuku',false),
   ('tokyo','Tokyo','ueno','Ueno',false),
   ('tokyo','Tokyo','akihabara','Akihabara',false),
-  ('konbini','Konbini','konbini','Konbini',true),
-  ('grocery','Grocery','grocery','Grocery',true)
+  ('konbini','Konbini','konbini','Konbini',true)
 on conflict (region_slug,area_slug) do update set region_name=excluded.region_name,area_name=excluded.area_name,is_nationwide=excluded.is_nationwide;
 update public.restaurants set region_slug='yamanashi',region_name='Yamanashi' where area_slug='kofu';
 update public.restaurants set region_slug='tokyo',region_name='Tokyo' where area_slug in ('shinjuku','ueno','akihabara');
 update public.restaurants set region_slug='konbini',region_name='Konbini' where area_slug='konbini';
+update public.restaurants set listing_type='grocery' where region_slug='grocery' or region_name='Grocery' or category ilike '%grocery%';
+update public.restaurants set region_slug='other',region_name='Other prefecture',area_slug='area-to-update',area_name='Area to update' where listing_type='grocery' and (region_slug='grocery' or area_slug='grocery');
 update public.restaurants set region_slug=area_slug,region_name=area_name where area_slug not in ('kofu','shinjuku','ueno','akihabara','konbini') and region_slug='yamanashi' and region_name='Yamanashi';
+delete from public.food_areas where region_slug='grocery' and area_slug='grocery';
 insert into public.food_areas (region_slug,region_name,area_slug,area_name,is_nationwide)
-select distinct region_slug,region_name,area_slug,area_name,region_slug in ('konbini','grocery') from public.restaurants
+select distinct region_slug,region_name,area_slug,area_name,region_slug='konbini' from public.restaurants
 on conflict (region_slug,area_slug) do nothing;
 
 create table if not exists public.mosque_places (
@@ -201,6 +229,16 @@ insert into public.restaurants (slug,region_slug,region_name,area_slug,area_name
   ('lawson','konbini','Konbini','konbini','Konbini','Lawson','Konbini','Nationwide chain · check current product labels at your local branch.','https://www.google.com/maps/search/?api=1&query=Lawson+convenience+store+Japan','https://commons.wikimedia.org/wiki/Special:FilePath/Japan_LAWSON_2026.jpg?width=1200','https://commons.wikimedia.org/wiki/File:Japan_LAWSON_2026.jpg'),
   ('seven-eleven','konbini','Konbini','konbini','Konbini','7-Eleven','Konbini','Nationwide chain · check current product labels at your local branch.','https://www.google.com/maps/search/?api=1&query=7-Eleven+convenience+store+Japan','https://commons.wikimedia.org/wiki/Special:FilePath/7-Eleven_Oita-Matsubaramachi-Store.jpg?width=1200','https://commons.wikimedia.org/wiki/File:7-Eleven_Oita-Matsubaramachi-Store.jpg')
 on conflict (slug) do update set region_slug=excluded.region_slug,region_name=excluded.region_name,area_slug=excluded.area_slug,area_name=excluded.area_name,name=excluded.name,category=excluded.category,description=excluded.description,map_url=excluded.map_url,image_url=coalesce(public.restaurants.image_url,excluded.image_url),image_source_url=coalesce(public.restaurants.image_source_url,excluded.image_source_url);
+
+-- Food directory attributes: user-provided halal scope, typical spend guide, and map point.
+update public.restaurants set listing_type='konbini', halal_scope='selected' where slug in ('lawson','seven-eleven');
+update public.restaurants set listing_type='restaurant', halal_scope='selected', price_min_yen=500, price_max_yen=2000,
+  latitude=35.667159, longitude=138.569001 where slug in ('mos-burger-kofu','saizeriya-kofu');
+insert into public.restaurants (slug,region_slug,region_name,area_slug,area_name,name,category,description,map_url,listing_type,halal_scope,price_min_yen,price_max_yen,latitude,longitude)
+values
+ ('gusto-kofu-asahi','yamanashi','Yamanashi','kofu','Kofu','Gusto Kofu Asahi','Family restaurant','Selected menu options reported by the community. Confirm ingredients and preparation at the branch.','https://store-info.skylark.co.jp/gusto/map/011185/','restaurant','selected',800,2000,35.673346,138.567953),
+ ('new-mahal-kofu','yamanashi','Yamanashi','kofu','Kofu','New Mahal Kofu','Indian restaurant','Entire menu reported halal by the community. Contact the restaurant to confirm current menu and preparation.','https://www.google.com/maps/search/?api=1&query=New+Mahal+1-4-12+Kitaguchi+Kofu+Yamanashi','restaurant','all',850,1500,null,null)
+on conflict (slug) do update set region_slug=excluded.region_slug,region_name=excluded.region_name,area_slug=excluded.area_slug,area_name=excluded.area_name,name=excluded.name,category=excluded.category,description=excluded.description,map_url=excluded.map_url,listing_type=excluded.listing_type,halal_scope=excluded.halal_scope,price_min_yen=excluded.price_min_yen,price_max_yen=excluded.price_max_yen,latitude=coalesce(public.restaurants.latitude,excluded.latitude),longitude=coalesce(public.restaurants.longitude,excluded.longitude);
 
 -- Preserve menu entries from earlier versions by creating a generic directory record for their keys.
 insert into public.restaurants (slug,area_slug,area_name,name,category,description)
@@ -405,8 +443,8 @@ revoke all on function public.remove_ride_passenger(uuid,text) from public;
 grant execute on function public.remove_ride_passenger(uuid,text) to anon, authenticated;
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('community-images', 'community-images', true, 4194304, array['image/jpeg','image/png','image/webp'])
-on conflict (id) do update set public = true, file_size_limit = 4194304,
+values ('community-images', 'community-images', true, 20971520, array['image/jpeg','image/png','image/webp'])
+on conflict (id) do update set public = true, file_size_limit = 20971520,
   allowed_mime_types = array['image/jpeg','image/png','image/webp'];
 
 drop policy if exists "Visitors may upload community images" on storage.objects;
@@ -426,8 +464,8 @@ create policy "Site admins may upload community videos" on storage.objects
   with check (bucket_id = 'community-videos' and public.is_site_admin());
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('student-submissions', 'student-submissions', true, 3145728, array['image/jpeg','image/png','image/webp'])
-on conflict (id) do update set public = true, file_size_limit = 3145728,
+values ('student-submissions', 'student-submissions', true, 16777216, array['image/jpeg','image/png','image/webp'])
+on conflict (id) do update set public = true, file_size_limit = 16777216,
   allowed_mime_types = array['image/jpeg','image/png','image/webp'];
 
 drop policy if exists "Visitors may upload student bulletin photos" on storage.objects;
