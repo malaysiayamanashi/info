@@ -42,10 +42,10 @@ create table if not exists public.featured_video (
 
 create table if not exists public.restaurants (
   slug text primary key check (char_length(btrim(slug)) between 2 and 80),
-  region_slug text not null default 'yamanashi' check (char_length(btrim(region_slug)) between 2 and 60),
-  region_name text not null default 'Yamanashi' check (char_length(btrim(region_name)) between 2 and 80),
-  area_slug text not null check (char_length(btrim(area_slug)) between 2 and 60),
-  area_name text not null check (char_length(btrim(area_name)) between 2 and 80),
+  region_slug text default 'yamanashi' check (region_slug is null or char_length(btrim(region_slug)) between 2 and 60),
+  region_name text default 'Yamanashi' check (region_name is null or char_length(btrim(region_name)) between 2 and 80),
+  area_slug text check (area_slug is null or char_length(btrim(area_slug)) between 2 and 60),
+  area_name text check (area_name is null or char_length(btrim(area_name)) between 2 and 80),
   name text not null check (char_length(btrim(name)) between 2 and 100),
   category text not null default 'Restaurant' check (char_length(btrim(category)) between 2 and 60),
   description text not null default '' check (char_length(description) <= 1000),
@@ -72,6 +72,15 @@ alter table public.restaurants add column if not exists price_min_yen integer;
 alter table public.restaurants add column if not exists price_max_yen integer;
 alter table public.restaurants add column if not exists latitude numeric(9,6);
 alter table public.restaurants add column if not exists longitude numeric(9,6);
+alter table public.restaurants alter column region_slug drop not null;
+alter table public.restaurants alter column region_name drop not null;
+alter table public.restaurants alter column area_slug drop not null;
+alter table public.restaurants alter column area_name drop not null;
+alter table public.restaurants drop constraint if exists restaurants_location_fields_check;
+alter table public.restaurants add constraint restaurants_location_fields_check check (
+  listing_type = 'konbini' or
+  (region_slug is not null and region_name is not null and area_slug is not null and area_name is not null)
+);
 alter table public.restaurants drop constraint if exists restaurants_listing_type_check;
 alter table public.restaurants add constraint restaurants_listing_type_check check (listing_type in ('restaurant','grocery','konbini'));
 alter table public.restaurants drop constraint if exists restaurants_halal_scope_check;
@@ -105,6 +114,7 @@ insert into public.food_areas (region_slug,region_name,area_slug,area_name,is_na
   ('tokyo','Tokyo','akihabara','Akihabara',false),
   ('konbini','Konbini','konbini','Konbini',true)
 on conflict (region_slug,area_slug) do update set region_name=excluded.region_name,area_name=excluded.area_name,is_nationwide=excluded.is_nationwide;
+create index if not exists restaurants_type_region_area_idx on public.restaurants (listing_type, region_slug, area_slug);
 update public.restaurants set region_slug='yamanashi',region_name='Yamanashi' where area_slug='kofu';
 update public.restaurants set region_slug='tokyo',region_name='Tokyo' where area_slug in ('shinjuku','ueno','akihabara');
 update public.restaurants set region_slug='konbini',region_name='Konbini' where area_slug='konbini';
@@ -113,7 +123,8 @@ update public.restaurants set region_slug='other',region_name='Other prefecture'
 update public.restaurants set region_slug=area_slug,region_name=area_name where area_slug not in ('kofu','shinjuku','ueno','akihabara','konbini') and region_slug='yamanashi' and region_name='Yamanashi';
 delete from public.food_areas where region_slug='grocery' and area_slug='grocery';
 insert into public.food_areas (region_slug,region_name,area_slug,area_name,is_nationwide)
-select distinct region_slug,region_name,area_slug,area_name,region_slug='konbini' from public.restaurants
+select distinct region_slug,region_name,area_slug,area_name,false from public.restaurants
+where region_slug is not null and region_name is not null and area_slug is not null and area_name is not null
 on conflict (region_slug,area_slug) do nothing;
 
 create table if not exists public.mosque_places (
@@ -236,6 +247,11 @@ on conflict (slug) do update set region_slug=excluded.region_slug,region_name=ex
 
 -- Food directory attributes: user-provided halal scope, typical spend guide, and map point.
 update public.restaurants set listing_type='konbini', halal_scope='selected' where slug in ('lawson','seven-eleven');
+update public.restaurants set listing_type='konbini' where region_slug='konbini' or area_slug='konbini' or category ilike '%konbini%';
+update public.restaurants set category='Konbini', region_slug=null, region_name=null, area_slug=null, area_name=null, price_level=null where listing_type='konbini';
+update public.restaurants set price_level=null, price_min_yen=null, price_max_yen=null where listing_type in ('konbini','grocery');
+alter table public.restaurants drop constraint if exists restaurants_nonrestaurant_price_check;
+alter table public.restaurants add constraint restaurants_nonrestaurant_price_check check (listing_type='restaurant' or (price_level is null and price_min_yen is null and price_max_yen is null));
 update public.restaurants set listing_type='restaurant', halal_scope='selected', price_min_yen=500, price_max_yen=2000,
   latitude=35.667159, longitude=138.569001 where slug in ('mos-burger-kofu','saizeriya-kofu');
 insert into public.restaurants (slug,region_slug,region_name,area_slug,area_name,name,category,description,map_url,listing_type,halal_scope,price_min_yen,price_max_yen,latitude,longitude)
@@ -646,4 +662,96 @@ begin
 end; $$;
 revoke all on function public.update_marketplace_post(uuid,text,text,text,text,text,text,text,text) from public;
 grant execute on function public.update_marketplace_post(uuid,text,text,text,text,text,text,text,text) to anon,authenticated;
+notify pgrst,'reload schema';
+
+-- Public place suggestions with admin moderation.
+create table if not exists public.place_suggestions (
+  id uuid primary key default gen_random_uuid(),
+  place_type text not null check (place_type in ('restaurant','grocery','konbini','prayer')),
+  place_name text not null check (char_length(btrim(place_name)) between 2 and 100),
+  prefecture text check (prefecture is null or char_length(btrim(prefecture)) between 2 and 80),
+  area text check (area is null or char_length(btrim(area)) between 2 and 80),
+  category text not null default '' check (char_length(category) <= 60),
+  description text not null default '' check (char_length(description) <= 1000),
+  map_url text check (map_url is null or (char_length(map_url) <= 1000 and map_url ~ '^https://')),
+  photo_url text check (photo_url is null or (char_length(photo_url) <= 1000 and photo_url ~ '^https://')),
+  suggested_by text not null default 'Community member' check (char_length(btrim(suggested_by)) between 2 and 60),
+  status text not null default 'pending' check (status in ('pending','published','rejected')),
+  created_at timestamptz not null default now()
+);
+alter table public.place_suggestions alter column prefecture drop not null;
+alter table public.place_suggestions alter column area drop not null;
+alter table public.place_suggestions drop constraint if exists place_suggestions_location_fields_check;
+alter table public.place_suggestions add constraint place_suggestions_location_fields_check check (place_type='konbini' or (prefecture is not null and area is not null));
+alter table public.place_suggestions enable row level security;
+revoke all on public.place_suggestions from anon, authenticated;
+grant select, insert on public.place_suggestions to anon, authenticated;
+grant update, delete on public.place_suggestions to authenticated;
+drop policy if exists "Public read approved place suggestions" on public.place_suggestions;
+create policy "Public read approved place suggestions" on public.place_suggestions for select to anon, authenticated using (status='published');
+drop policy if exists "Admins read all place suggestions" on public.place_suggestions;
+create policy "Admins read all place suggestions" on public.place_suggestions for select to authenticated using (public.is_site_admin());
+drop policy if exists "Visitors submit place suggestions for review" on public.place_suggestions;
+create policy "Visitors submit place suggestions for review" on public.place_suggestions for insert to anon, authenticated with check (status='pending');
+drop policy if exists "Admins moderate place suggestions" on public.place_suggestions;
+create policy "Admins moderate place suggestions" on public.place_suggestions for update to authenticated using (public.is_site_admin()) with check (public.is_site_admin());
+drop policy if exists "Admins delete place suggestions" on public.place_suggestions;
+create policy "Admins delete place suggestions" on public.place_suggestions for delete to authenticated using (public.is_site_admin());
+create index if not exists place_suggestions_status_created_idx on public.place_suggestions (status, created_at desc);
+do $$ begin
+ if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='place_suggestions') then alter publication supabase_realtime add table public.place_suggestions; end if;
+end $$;
+notify pgrst,'reload schema';
+-- Approved community suggestions also seed the saved prefecture and area choices.
+insert into public.food_areas(region_slug,region_name,area_slug,area_name,is_nationwide)
+select coalesce(nullif(btrim(regexp_replace(lower(btrim(prefecture)),'[^a-z0-9]+','-','g'),'-'),''),'region-'||left(replace(id::text,'-',''),8)),prefecture,
+       coalesce(nullif(btrim(regexp_replace(lower(btrim(area)),'[^a-z0-9]+','-','g'),'-'),''),'area-'||left(replace(id::text,'-',''),8)),area,false
+from public.place_suggestions where status='published' and place_type in ('restaurant','grocery') and prefecture is not null and area is not null
+on conflict(region_slug,area_slug) do nothing;
+-- Previously approved Konbini suggestions are stored in the separate Konbini directory.
+insert into public.restaurants (slug,region_slug,region_name,area_slug,area_name,name,category,description,map_url,image_url,listing_type,halal_scope)
+select 'community-konbini-'||replace(id::text,'-',''),null,null,null,null,place_name,'Konbini',description,map_url,photo_url,'konbini','selected'
+from public.place_suggestions where place_type='konbini' and status='published'
+on conflict (slug) do nothing;
+
+-- Accepted prayer-space submissions become editable entries in the Local mosques directory.
+insert into public.mosque_places (slug,area_name,name,description,map_url,image_url)
+select 'community-prayer-'||replace(id::text,'-',''),area||', '||prefecture,place_name,description,map_url,photo_url
+from public.place_suggestions
+where place_type='prayer' and status='published'
+on conflict (slug) do nothing;
+drop function if exists public.moderate_place_suggestion(uuid,text);
+create function public.moderate_place_suggestion(p_id uuid,p_status text) returns text language plpgsql security definer set search_path='' as $$
+declare v_suggestion public.place_suggestions%rowtype;
+begin
+ if coalesce(public.is_site_admin(),false)=false then return 'not_admin'; end if;
+ if p_status not in ('published','rejected') then return 'invalid_status'; end if;
+ select * into v_suggestion from public.place_suggestions where id=p_id for update;
+ if not found then return 'not_found'; end if;
+ if p_status='published' and v_suggestion.place_type in ('restaurant','grocery') then
+  insert into public.food_areas(region_slug,region_name,area_slug,area_name,is_nationwide)
+  values(
+   coalesce(nullif(btrim(regexp_replace(lower(btrim(v_suggestion.prefecture)),'[^a-z0-9]+','-','g'),'-'),''),'region-'||left(replace(v_suggestion.id::text,'-',''),8)),
+   v_suggestion.prefecture,
+   coalesce(nullif(btrim(regexp_replace(lower(btrim(v_suggestion.area)),'[^a-z0-9]+','-','g'),'-'),''),'area-'||left(replace(v_suggestion.id::text,'-',''),8)),
+   v_suggestion.area,false
+  ) on conflict(region_slug,area_slug) do nothing;
+ end if; if v_suggestion.place_type='konbini' and p_status='published' then
+  insert into public.restaurants(slug,region_slug,region_name,area_slug,area_name,name,category,description,map_url,image_url,listing_type,halal_scope)
+  values('community-konbini-'||replace(v_suggestion.id::text,'-',''),null,null,null,null,v_suggestion.place_name,'Konbini',v_suggestion.description,v_suggestion.map_url,v_suggestion.photo_url,'konbini','selected')
+  on conflict(slug) do update set name=excluded.name,category=excluded.category,description=excluded.description,map_url=excluded.map_url,image_url=excluded.image_url;
+ elsif v_suggestion.place_type='konbini' and p_status='rejected' then
+  delete from public.restaurants where slug='community-konbini-'||replace(v_suggestion.id::text,'-','');
+ end if; if v_suggestion.place_type='prayer' and p_status='published' then
+  insert into public.mosque_places(slug,area_name,name,description,map_url,image_url)
+  values('community-prayer-'||replace(v_suggestion.id::text,'-',''),v_suggestion.area||', '||v_suggestion.prefecture,v_suggestion.place_name,v_suggestion.description,v_suggestion.map_url,v_suggestion.photo_url)
+  on conflict(slug) do update set area_name=excluded.area_name,name=excluded.name,description=excluded.description,map_url=excluded.map_url,image_url=excluded.image_url;
+ elsif v_suggestion.place_type='prayer' and p_status='rejected' then
+  delete from public.mosque_places where slug='community-prayer-'||replace(v_suggestion.id::text,'-','');
+ end if;
+ update public.place_suggestions set status=p_status where id=p_id;
+ return 'updated';
+end; $$;
+revoke all on function public.moderate_place_suggestion(uuid,text) from public;
+grant execute on function public.moderate_place_suggestion(uuid,text) to authenticated;
 notify pgrst,'reload schema';
